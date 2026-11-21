@@ -41,9 +41,21 @@ docker compose exec -T backend python -m scripts.seed_demo
 
 ## 算法与规格
 
-seed42生成120条固定参考样，VLSFO/MGO各60；它们有独立等级与密度范围。对单个等级的参考密度`StandardScaler`后拟合`KernelDensity(kernel='gaussian',bandwidth=.3)`。将参考样自身log likelihood第5分位作为低似然阈值；待测样只调用transform/score_samples，不进入fit。返回等级、参考编号/数值、参考数、阈值、待测分数、70点物理量纲概率密度曲线，均由worker实际计算。
+seed42生成固定参考样，VLSFO/MGO各80条、分布在两个参考罐（60+20）；它们有独立等级与密度范围。对单个等级的参考密度`StandardScaler`后拟合`KernelDensity(kernel='gaussian',bandwidth=.3)`。将参考样自身log likelihood第5分位作为低似然阈值；待测样只调用transform/score_samples，不进入fit。返回等级、参考编号/数值、参考数、阈值、待测分数、70点物理量纲概率密度曲线，均由worker实际计算。
 
-原样合格需同时达到KDE阈值和等级规格。KDE判异表示需要复测，不直接代表成品不可用。复检记录经化验员签注、达到等级硬规格可人工解除异常；这里不对复检值二次做自动KDE拒绝。等级演示内控值：VLSFO密度925–1010、黏度10–380、硫≤0.5%；MGO密度820–890、黏度1–12、硫≤0.1%。密度kg/m³@15℃，黏度mm²/s。这些是本场景演示值，并非完整海事检验标准。参考不足20条或无变化时失败，原样未合格不能调拨。
+### V4 逐罐留一与封存轮次
+
+同罐参考样偏多时，送检油样可能被同罐分布「带过线」。V4把单分布比对改为按罐留一：
+
+1. **密度比对排除取样罐**：先按储罐整体排除取样罐，再对同等级每个参考罐逐罐留一——每次剔除该罐全部封存参考，用其余罐参考重新拟合KDE并打分。
+2. **每种留一都过线且符合规格才可签放**：所有留一组均`passed`才判`qualified`；任一组参考不足（留一后<20条或无变化，记`insufficient`）或组间结论翻转（部分过线、部分判异），油样进入`review`待复核，调拨申请与放行一律拦截。全部判异仍走`anomaly`复检流程。
+3. **受理即封存**：执行比对时把该等级全部参考罐与测值复制到`round_references`，轮次内不可变；之后参考读数修订、删除都不影响封存集。
+4. **中断恢复与重算**：worker从Redis取任务后只读取封存测值。`force=false`（`density-check`队列）只补缺或恢复，已有留一判定不重算、不新增结论；化验页显式重算走`density-recompute`（`force=true`），仍只读封存值、不新增封存参考。
+5. **主管补登参考后另开一轮**：`POST /reference-samples`仅主管可用且须符合等级规格，只入参考库不影响在效轮；`POST /compare-rounds`把旧轮置`closed`并开立新轮、重新封存，同等级同时只有一轮active。
+6. **换轮与签放并发**：未签调拨只认当前轮——放行时若依据轮已不是active轮且当前轮无该样全部过线留一，拦截；重新比对通过后依据更新为当前轮。已签（released）调拨永久保留原`basis_round_seq`与化验快照，换轮不改写。
+7. **化验页面**可中断恢复、用封存测值重算，并按轮次/被剔罐查看每组留一的拟合参考数、分数、阈值与规格结论；「逐罐留一轮次」页展示各轮封存罐、补登参考与开轮操作。
+
+原样合格需同时达到每组留一KDE阈值和等级规格。KDE判异表示需要复测，不直接代表成品不可用。复检记录经化验员签注、达到等级硬规格可人工解除异常；这里不对复检值二次做自动KDE拒绝。等级演示内控值：VLSFO密度925–1010、黏度10–380、硫≤0.5%；MGO密度820–890、黏度1–12、硫≤0.1%。密度kg/m³@15℃，黏度mm²/s。这些是本场景演示值，并非完整海事检验标准。单组留一后参考不足20条或无变化时该组失败（insufficient），整单待复核；原样未合格或待复核不能调拨。
 
 ## 技术与职责
 
@@ -59,7 +71,7 @@ seed42生成120条固定参考样，VLSFO/MGO各60；它们有独立等级与密
 
 `backend/src/receipt_models.py`新增TankCapacity/TankReceipt/LoadingReconciliation三张关联表，原表列不变；`receipt_schemas.py`校验罐基准、收油测值和表计输入；`receipt_service.py`锁罐入量、加权密度、调查结案；`receipt_routes.py`提供`/tank-capacities`、`/tank-receipts`及`/loading-reconciliations`。create_all非破坏性建表，旧数据无需改列迁移。
 
-前端`pages/tanks.js`、`samples.js`、`evidence.js`、`transfers.js`分别处理罐、收样、分布复检、调拨；新增`receipts.js`收油计划/罐容基准/核对入罐，`reconciliations.js`船岸表计与调查结案。`components/logbook.js`共享shell/heading/sampleTag/tankTag/notice；样品状态标签在收样和复检复用；`utils/api.js`会话/API/store，`utils/format.js`数字/转义/上海时间。角色、油样状态、收油状态、对账状态在`backend/src/constants.py`与`frontend/src/constants.js`定义；等级规格在backend constants及GET /grades供页面复用；角色和状态实际使用处为security.py/main.py/worker.py/transfer_service.py以及前端页面。
+前端`pages/tanks.js`、`samples.js`、`evidence.js`、`transfers.js`分别处理罐、收样、分布复检、调拨；新增`receipts.js`收油计划/罐容基准/核对入罐，`reconciliations.js`船岸表计与调查结案，`rounds.js`逐罐留一轮次/封存参考/主管补登。`components/logbook.js`共享shell/heading/sampleTag/tankTag/notice；样品状态标签在收样和复检复用；`utils/api.js`会话/API/store，`utils/format.js`数字/转义/上海时间。角色、油样状态、收油状态、对账状态在`backend/src/constants.py`与`frontend/src/constants.js`定义；等级规格在backend constants及GET /grades供页面复用；角色和状态实际使用处为security.py/main.py/worker.py/transfer_service.py以及前端页面。
 
 五服务frontend/backend/worker/db/redis有独立健康检查；backend/worker依赖db/redis healthy，前端等待backend。命名卷db-data/redis-data/artifacts；worker共享卷保存模型证据和心跳。Nginx /api/剥前缀代理，后端路由无/api双重前缀。`.env.example`提供COMPOSE_PROJECT_NAME、三端口、JWT_SECRET、DOCKER_SUBNET；内部DATABASE_URL/REDIS_URL/SEED_DEMO在Compose设置。由于宿主默认地址池耗尽，显式10.221.29.0/24，可通过DOCKER_SUBNET改为无冲突网段。
 
@@ -79,6 +91,10 @@ License: MIT.
 - 燃油留样与委托：released调拨才可登记RetainedSample；一调拨一封样、seal_code全局唯一、500–5000mL、登记日起至少90天。主管仅向有效封样委托，存在未结案委托时不允许重复；化验员一次登记密度及报告依据，按原油品等级标记超规格；主管结案冻结结果，超规格须至少8字处置依据。委托不修改原FuelSample、原调拨化验或KDE参考。
 
 正式调拨放行必须同时满足两项新前置。历史已released记录保持原状；旧requested单须补许可和窗口。主管在管线页填写至少8字完工依据可释放管线与泊位一次；船岸计量对账结案也自动完成同一资源释放，重复不再动库存。已完成窗口仍保留在重叠历史中。
+
+## V4 逐罐留一（数据表与接口）
+
+新增`round_models.py`三张表，均由`create_all`非破坏性建表，原表仅给`transfers`追加两个可空依据列：`compare_rounds`（按等级的轮次，同等级唯一active）、`round_references`（受理时封存的参考罐与15℃密度，轮次+参考样唯一）、`sample_fold_results`（每油样×轮次×被剔罐一行，状态passed/anomaly/insufficient，含分数、阈值、拟合数与证据JSON，唯一键防重）。`round_service.py`负责开轮/封存/逐罐留一/恢复重算/轮次视图；`round_routes.py`提供`GET/POST /compare-rounds`、`GET/POST /reference-samples`、`GET /samples/{id}/folds`、`POST /samples/{id}/recompute`。worker改为消费`density-check`（恢复，不覆盖已有判定）与`density-recompute`（封存值重算）两条队列。`transfers.basis_round_id/basis_round_seq`冻结申请依据；未签调拨放行时校验当前轮，已签调拨不受换轮影响。seed新增TK-07/TK-M02两个第二参考罐各20条参考，保证任一罐被剔后训练集仍≥20条；旧库重跑seed只补不覆盖。
 
 新增后端harbor_models/schemas/service/routes.py及前端pages/lines.js、windows.js、retention.js，6张关联表由create_all补建，原表无新增列。seed只按自然键补两条输油管线和两座泊位，双跑不覆盖在用状态、许可、预约或检验记录。登录后导航共9页，前端仍为原生HTML/CSS/JS。
 

@@ -31,3 +31,6 @@ target/
 *.o
 *.obj
 .DS_Store
+
+# 测试脚本与验证产物独立存放，不进源码仓库
+test-artifacts/

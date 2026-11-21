@@ -1,5 +1,5 @@
 from decimal import Decimal
-from sqlalchemy import String,Numeric,Float,Boolean,ForeignKey,Text,CheckConstraint
+from sqlalchemy import String,Numeric,Float,Boolean,ForeignKey,Text,Integer,CheckConstraint
 from sqlalchemy.orm import Mapped,mapped_column
 from .database import Base
 class User(Base):
@@ -46,6 +46,8 @@ class Transfer(Base):
     viscosity_snapshot:Mapped[Decimal]=mapped_column(Numeric(10,3))
     sulfur_snapshot:Mapped[Decimal]=mapped_column(Numeric(7,4))
     released_by:Mapped[str]=mapped_column(String(120),default='')
+    basis_round_id:Mapped[int|None]=mapped_column(ForeignKey('compare_rounds.id'),nullable=True)
+    basis_round_seq:Mapped[int|None]=mapped_column(Integer,nullable=True)
 class Audit(Base):
     __tablename__='audit'
     id:Mapped[int]=mapped_column(primary_key=True)

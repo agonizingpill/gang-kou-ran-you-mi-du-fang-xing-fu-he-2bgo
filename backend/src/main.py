@@ -27,6 +27,8 @@ from .receipt_routes import router as receipt_router
 app.include_router(receipt_router)
 from .harbor_routes import router as harbor_router
 app.include_router(harbor_router)
+from .round_routes import router as round_router
+app.include_router(round_router)
 @app.exception_handler(IntegrityError)
 async def duplicate(request,e):return JSONResponse({'detail':'编号已存在或关联记录不合法'},status_code=409)
 @app.get('/health')
@@ -67,9 +69,18 @@ def compare_sample(id:int,u=Depends(current)):
     allow(u,'admin','chemist')
     with Session.begin() as s:
         x=get(s,FuelSample,id,True)
-        if x.reference or x.status not in ['received','failed']:raise HTTPException(409,'该样品已比对或不可重新计算')
-        x.status='queued';audit(s,u,'sample_compared',x.code)
-    r.rpush('density-check',id);return {'status':'queued'}
+        if x.reference:raise HTTPException(409,'参考样不参与留一比对')
+        t=get(s,Tank,x.tank_id)
+        from . import round_service as rs
+        from .round_models import SampleFoldResult
+        rnd=rs.ensure_round(s,t.grade,u)
+        has_current=s.scalar(select(SampleFoldResult.id).where(SampleFoldResult.sample_id==x.id,SampleFoldResult.round_id==rnd.id))
+        # 已在当前轮留一过的不可重复入队；换轮后当前轮无结果则允许重新比对
+        if has_current and x.status not in ['failed']:raise HTTPException(409,'该样品在当前比对轮已完成逐罐留一，如需重算请用化验页重算')
+        # 受理时封存参考罐和测值（幂等），后续中断恢复与重算都只读封存集
+        rs.seal_references(s,rnd,t.grade,u)
+        x.status='queued';audit(s,u,'sample_compared',f'{x.code}:R{rnd.seq} 逐罐留一')
+    r.rpush('density-check',id);return {'status':'queued','round_seq':rnd.seq}
 @app.put('/samples/{id}/retest')
 def retest_sample(id:int,d:RetestIn,u=Depends(current)):
     allow(u,'admin','chemist')
